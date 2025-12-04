@@ -10,32 +10,18 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     
-    # Optional: Add matrix for multiple Java versions
-    # strategy:
-    #   matrix:
-    #     java-version: ['17', '21']
-    
     steps:
       # Étape 1 : Prendre le code
       - name: Télécharger le code
         uses: actions/checkout@v4
       
-      # Étape 2 : Installer Java
+      # Étape 2 : Installer Java avec cache
       - name: Installer Java 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: maven
-      
-      # Optional: Cache Maven dependencies for faster builds
-      - name: Cache Maven dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.m2
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: |
-            ${{ runner.os }}-m2
+          cache: 'maven'
       
       # Étape 3 : Afficher les informations
       - name: Afficher les infos
@@ -43,84 +29,128 @@ jobs:
           echo "=== INFORMATIONS ==="
           echo "Utilisateur : ${{ github.actor }}"
           echo "Branche : ${{ github.ref }}"
+          echo "Commit : ${{ github.sha }}"
           echo "Java version :"
           java --version
           echo ""
           echo "Maven version :"
-          mvn --version || ./mvnw --version
+          mvn --version
           echo ""
+          echo "Répertoire de travail :"
+          pwd
+          ls -la
       
       # Étape 4 : Compiler le projet
       - name: Compiler
         run: mvn clean compile -B
-        # Or use Maven wrapper: ./mvnw clean compile -B
       
       # Étape 5 : Exécuter les tests
       - name: Tests unitaires
         run: mvn test -B
-        # Or use Maven wrapper: ./mvnw test -B
       
-      # Étape 6 : Résultats - FIXED: More robust way to find test reports
+      # Étape 6 : Résultats des tests
       - name: Afficher résultats
         if: always()
         run: |
-          echo "=== RÉSULTATS ==="
+          echo "=== RÉSULTATS DES TESTS ==="
           
-          # Check if test reports directory exists
-          if [ -d target/surefire-reports ]; then
-            echo "Fichiers de rapport trouvés :"
-            ls -la target/surefire-reports/
-            echo ""
+          # Vérifier si le projet est un projet Maven
+          if [ ! -f "pom.xml" ]; then
+            echo "ERREUR : Fichier pom.xml non trouvé!"
+            echo "Assurez-vous que c'est un projet Maven."
+            exit 1
+          fi
+          
+          # Afficher les résultats des tests
+          if [ -d "target/surefire-reports" ]; then
+            echo "Rapports de tests trouvés dans target/surefire-reports/"
             
-            # Look for any test report file
-            REPORT_FILE=$(find target/surefire-reports -name "*.txt" | head -1)
+            # Chercher tous les fichiers de rapport
+            REPORT_FILES=$(find target/surefire-reports -name "*.txt" 2>/dev/null || true)
             
-            if [ -n "$REPORT_FILE" ] && [ -f "$REPORT_FILE" ]; then
-              echo "=== DERNIER RAPPORT DE TESTS ==="
-              cat "$REPORT_FILE"
+            if [ -n "$REPORT_FILES" ]; then
+              echo "=== CONTENU DES RAPPORTS ==="
+              for report in $REPORT_FILES; do
+                echo "--- $report ---"
+                cat "$report" || echo "Impossible de lire le fichier"
+                echo ""
+              done
             else
-              echo "Aucun rapport .txt trouvé, vérifiant les fichiers .xml"
-              XML_FILE=$(find target/surefire-reports -name "*.xml" | head -1)
-              if [ -n "$XML_FILE" ]; then
-                echo "Fichier XML trouvé : $XML_FILE"
-                # You could parse XML here if needed
+              echo "Aucun fichier .txt trouvé. Vérification des fichiers XML..."
+              XML_FILES=$(find target/surefire-reports -name "*.xml" 2>/dev/null || true)
+              if [ -n "$XML_FILES" ]; then
+                echo "Fichiers XML trouvés :"
+                echo "$XML_FILES"
               fi
             fi
+            
+            # Résumé statistique
+            echo ""
+            echo "=== STATISTIQUES ==="
+            
+            # Compter les tests à partir des fichiers XML
+            TOTAL_TESTS=0
+            FAILED_TESTS=0
+            ERROR_TESTS=0
+            
+            for xml_file in target/surefire-reports/*.xml 2>/dev/null || true; do
+              if [ -f "$xml_file" ]; then
+                TESTS=$(grep -o 'tests="[0-9]*"' "$xml_file" | head -1 | cut -d'"' -f2)
+                FAILURES=$(grep -o 'failures="[0-9]*"' "$xml_file" | head -1 | cut -d'"' -f2)
+                ERRORS=$(grep -o 'errors="[0-9]*"' "$xml_file" | head -1 | cut -d'"' -f2)
+                
+                TOTAL_TESTS=$((TOTAL_TESTS + ${TESTS:-0}))
+                FAILED_TESTS=$((FAILED_TESTS + ${FAILURES:-0}))
+                ERROR_TESTS=$((ERROR_TESTS + ${ERRORS:-0}))
+              fi
+            done
+            
+            echo "Total des tests : $TOTAL_TESTS"
+            echo "Tests échoués : $FAILED_TESTS"
+            echo "Tests en erreur : $ERROR_TESTS"
+            
+            if [ $FAILED_TESTS -eq 0 ] && [ $ERROR_TESTS -eq 0 ]; then
+              echo "✅ TOUS LES TESTS ONT RÉUSSI"
+            else
+              echo "❌ IL Y A DES ÉCHECS OU ERREURS"
+            fi
+            
           else
-            echo "Aucun répertoire de rapports trouvé (target/surefire-reports)"
-          fi
-          
-          # Alternative: Use Maven's surefire-report plugin
-          echo ""
-          echo "=== RÉSUMÉ DES TESTS ==="
-          if [ -f target/surefire-reports/TEST-*.xml ]; then
-            # Count tests from all XML files
-            TOTAL_TESTS=$(grep -h "testsuite" target/surefire-reports/TEST-*.xml | grep -o 'tests="[0-9]*"' | cut -d'"' -f2 | paste -sd+ | bc)
-            FAILED_TESTS=$(grep -h "testsuite" target/surefire-reports/TEST-*.xml | grep -o 'failures="[0-9]*"' | cut -d'"' -f2 | paste -sd+ | bc)
-            ERRORS=$(grep -h "testsuite" target/surefire-reports/TEST-*.xml | grep -o 'errors="[0-9]*"' | cut -d'"' -f2 | paste -sd+ | bc)
-            echo "Total tests: ${TOTAL_TESTS:-0}, Échecs: ${FAILED_TESTS:-0}, Erreurs: ${ERRORS:-0}"
-          else
-            echo "Impossible de générer le résumé des tests"
+            echo "Aucun rapport de test trouvé dans target/surefire-reports/"
+            echo "Vérifiez que les tests ont bien été exécutés."
           fi
       
-      # Étape 7 : Notifier en cas d'échec
-      - name: Notifier échec
-        if: failure()
-        run: |
-          echo "❌ TESTS ÉCHOUÉS"
-          echo "Veuillez corriger les erreurs"
-          echo ""
-          echo "Détails du workflow :"
-          echo "  - Job: ${{ github.job }}"
-          echo "  - Run ID: ${{ github.run_id }}"
-          echo "  - Commit: ${{ github.sha }}"
-      
-      # Optional: Upload test results as artifact
-      - name: Upload test results
+      # Étape 7 : Télécharger les rapports de tests comme artefact
+      - name: Télécharger les rapports de tests
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: test-reports
           path: |
             target/surefire-reports/
-            target/failsafe-reports/
+          retention-days: 7
+      
+      # Étape 8 : Notifier en cas d'échec
+      - name: Notifier échec
+        if: failure()
+        run: |
+          echo ""
+          echo "========================================"
+          echo "❌  PIPELINE ÉCHOUÉE  ❌"
+          echo "========================================"
+          echo ""
+          echo "Détails :"
+          echo "- Workflow : ${{ github.workflow }}"
+          echo "- Job : ${{ github.job }}"
+          echo "- Run ID : ${{ github.run_id }}"
+          echo "- Commit : ${{ github.sha }}"
+          echo "- Lien vers l'exécution : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo ""
+          echo "Actions nécessaires :"
+          echo "1. Vérifier les erreurs de compilation"
+          echo "2. Examiner les tests qui ont échoué"
+          echo "3. Corriger le code ou les tests"
+          echo "4. Pousser les corrections"
+          echo ""
+          echo "Les rapports de tests sont disponibles dans l'onglet 'Artifacts'"
+          echo "========================================"
